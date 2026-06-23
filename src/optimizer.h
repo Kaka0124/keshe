@@ -9,12 +9,6 @@
 // ============================================================
 // Simulated Annealing optimizer
 // ============================================================
-//
-// Operates on job ordering (permutation). Each perturbed ordering is
-// fed through the greedy scheduler to produce a valid schedule.
-// The greedy scheduler guarantees legality, so we never produce
-// invalid solutions during SA.
-
 class SAOptimizer {
 public:
     struct Config {
@@ -35,30 +29,59 @@ public:
                 const std::vector<Job> &jobs,
                 const Config &cfg = Config());
 
-    // Run SA starting from the given initial schedule.
-    // Returns the best schedule found.
     std::vector<ScheduleRecord> optimize(
         const std::vector<ScheduleRecord> &initial_schedule
     );
 
 private:
-    // Compute a composite energy (lower = better) from metrics
     double energy(const EvalMetrics &m) const;
-
-    // Build a valid schedule from a job ordering
-    std::vector<ScheduleRecord> scheduleFromOrdering(
-        const std::vector<int> &job_order
-    );
-
-    // Perturb job ordering: swap two random positions
+    std::vector<ScheduleRecord> scheduleFromOrdering(const std::vector<int> &job_order);
     void perturb(std::vector<int> &order);
 
     const std::vector<ServerSpec> &servers;
     const std::vector<Job> &jobs;
     Config cfg;
     std::chrono::steady_clock::time_point start_time;
+    long long elapsedMs() const;
+};
 
-    // time since start in ms
+// ============================================================
+// Late Acceptance Hill Climbing optimizer
+// ============================================================
+//
+// Parameter-free alternative to SA. Maintains a history of past
+// objective values. Accepts a move if it beats the value from
+// L iterations ago. Works well on hard/extreme cases where
+// SA temperature tuning is difficult.
+class LAHCOptimizer {
+public:
+    struct Config {
+        int history_length;
+        long long time_budget_ms;
+        int no_improve_limit;
+
+        Config()
+            : history_length(500), time_budget_ms(50000),
+              no_improve_limit(50000) {}
+    };
+
+    LAHCOptimizer(const std::vector<ServerSpec> &servers,
+                  const std::vector<Job> &jobs,
+                  const Config &cfg = Config());
+
+    std::vector<ScheduleRecord> optimize(
+        const std::vector<ScheduleRecord> &initial_schedule
+    );
+
+private:
+    double energy(const EvalMetrics &m) const;
+    std::vector<ScheduleRecord> scheduleFromOrdering(const std::vector<int> &job_order);
+    void perturb(std::vector<int> &order);
+
+    const std::vector<ServerSpec> &servers;
+    const std::vector<Job> &jobs;
+    Config cfg;
+    std::chrono::steady_clock::time_point start_time;
     long long elapsedMs() const;
 };
 

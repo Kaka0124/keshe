@@ -23,48 +23,58 @@ int main() {
     // --- Phase 1: Multi-strategy greedy for initial solution ---
     vector<ScheduleRecord> best_records = runMultiStrategy(servers, jobs);
 
-    // --- Phase 2: SA improvement (time-budgeted) ---
-    // Only run SA if instance is not trivial (N <= 20: greedy is sufficient)
+    // --- Phase 2: Metaheuristic improvement (time-budgeted) ---
     if (N > 20) {
-        SAOptimizer::Config sa_cfg;
-
-        // SA is highly effective (77-98% improvement observed).
-        // Allocate time budget proportional to instance size, keeping
-        // total runtime under 60s per case.
-        if (N <= 100) {
-            sa_cfg.time_budget_ms = 5000;     // 5s
-            sa_cfg.iterations_per_temp = 100;
-            sa_cfg.cooling_rate = 0.999;
-            sa_cfg.initial_temp = 200.0;
-        } else if (N <= 1000) {
-            sa_cfg.time_budget_ms = 25000;    // 25s
-            sa_cfg.iterations_per_temp = 80;
-            sa_cfg.cooling_rate = 0.9995;
-            sa_cfg.initial_temp = 500.0;
-        } else {
-            sa_cfg.time_budget_ms = 50000;    // 50s
-            sa_cfg.iterations_per_temp = 50;
-            sa_cfg.cooling_rate = 0.9997;
-            sa_cfg.initial_temp = 1000.0;
+        double best_score = 0;
+        {
+            auto m = computeMetrics(servers, jobs, best_records);
+            best_score = m.wait_score * 0.01 + m.memory_score + m.finish_score * 0.1;
         }
-        sa_cfg.no_improve_limit = 50000;
 
-        EvalMetrics before_sa = computeMetrics(servers, jobs, best_records);
+        // ----- SA -----
+        {
+            SAOptimizer::Config sa_cfg;
+            if (N <= 100) {
+                sa_cfg.time_budget_ms = 5000;
+                sa_cfg.iterations_per_temp = 100;
+                sa_cfg.cooling_rate = 0.999;
+                sa_cfg.initial_temp = 200.0;
+            } else if (N <= 1000) {
+                sa_cfg.time_budget_ms = 25000;
+                sa_cfg.iterations_per_temp = 80;
+                sa_cfg.cooling_rate = 0.9995;
+                sa_cfg.initial_temp = 500.0;
+            } else {
+                // Hard/extreme: higher temp, slower cooling, 27s for SA
+                sa_cfg.time_budget_ms = 27000;
+                sa_cfg.iterations_per_temp = 80;
+                sa_cfg.cooling_rate = 0.9998;
+                sa_cfg.initial_temp = 2000.0;
+            }
+            sa_cfg.no_improve_limit = 100000;
 
-        SAOptimizer optimizer(servers, jobs, sa_cfg);
-        auto sa_records = optimizer.optimize(best_records);
+            SAOptimizer sa_opt(servers, jobs, sa_cfg);
+            auto sa_rec = sa_opt.optimize(best_records);
+            if (!sa_rec.empty()) {
+                auto m = computeMetrics(servers, jobs, sa_rec);
+                double s = m.wait_score * 0.01 + m.memory_score + m.finish_score * 0.1;
+                if (s < best_score) { best_score = s; best_records = sa_rec; }
+            }
+        }
 
-        if (!sa_records.empty()) {
-            EvalMetrics after_sa = computeMetrics(servers, jobs, sa_records);
-            // Accept SA result only if it improves (or is equal to) the greedy result
-            double before_score = before_sa.wait_score * 0.01
-                                + before_sa.memory_score
-                                + before_sa.finish_score * 0.1;
-            double after_score  = after_sa.wait_score * 0.01
-                                + after_sa.memory_score
-                                + after_sa.finish_score * 0.1;
-            if (after_score <= before_score) {
-                best_records = sa_records;
+        // ----- LAHC (parallel alternative for hard/extreme) -----
+        if (N > 1000) {
+            LAHCOptimizer::Config lahc_cfg;
+            lahc_cfg.time_budget_ms = 27000;  // 27s for LAHC, total ~55s
+            lahc_cfg.history_length = (N <= 3000) ? 1000 : 2000;
+            lahc_cfg.no_improve_limit = 100000;
+
+            LAHCOptimizer lahc_opt(servers, jobs, lahc_cfg);
+            auto lahc_rec = lahc_opt.optimize(best_records);
+            if (!lahc_rec.empty()) {
+                auto m = computeMetrics(servers, jobs, lahc_rec);
+                double s = m.wait_score * 0.01 + m.memory_score + m.finish_score * 0.1;
+                if (s < best_score) { best_score = s; best_records = lahc_rec; }
             }
         }
     }
