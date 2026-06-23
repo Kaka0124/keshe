@@ -1,3 +1,4 @@
+#include <chrono>
 #include <iostream>
 
 #include "src/constraint_checker.h"
@@ -22,60 +23,89 @@ int main() {
 
     // --- Phase 1: Multi-strategy greedy for initial solution ---
     vector<ScheduleRecord> best_records = runMultiStrategy(servers, jobs);
+    // Save the greedy baseline so we can always fall back to it
+    const vector<ScheduleRecord> greedy_baseline = best_records;
+    double greedy_score = 0;
+    {
+        auto m = computeMetrics(servers, jobs, greedy_baseline);
+        greedy_score = m.wait_score * 0.01 + m.memory_score + m.finish_score * 0.1;
+    }
 
     // --- Phase 2: Metaheuristic improvement (time-budgeted) ---
     if (N > 20) {
-        double best_score = 0;
-        {
-            auto m = computeMetrics(servers, jobs, best_records);
-            best_score = m.wait_score * 0.01 + m.memory_score + m.finish_score * 0.1;
-        }
+        double best_score = greedy_score;
 
-        // ----- SA -----
-        {
-            SAOptimizer::Config sa_cfg;
-            if (N <= 100) {
-                sa_cfg.time_budget_ms = 5000;
-                sa_cfg.iterations_per_temp = 100;
-                sa_cfg.cooling_rate = 0.999;
-                sa_cfg.initial_temp = 200.0;
-            } else if (N <= 1000) {
+        if (N <= 3000) {
+            // ---- Full SA + LAHC for small/medium/hard cases ----
+            {
+                SAOptimizer::Config sa_cfg;
+                if (N <= 100) {
+                    sa_cfg.time_budget_ms = 5000;
+                    sa_cfg.iterations_per_temp = 100;
+                    sa_cfg.cooling_rate = 0.999;
+                    sa_cfg.initial_temp = 200.0;
+                } else if (N <= 1000) {
+                    sa_cfg.time_budget_ms = 25000;
+                    sa_cfg.iterations_per_temp = 60;
+                    sa_cfg.cooling_rate = 0.9995;
+                    sa_cfg.initial_temp = 500.0;
+                } else {
+                    sa_cfg.time_budget_ms = 25000;
+                    sa_cfg.iterations_per_temp = 40;
+                    sa_cfg.cooling_rate = 0.9995;
+                    sa_cfg.initial_temp = 1000.0;
+                }
+                sa_cfg.no_improve_limit = 50000;
+                SAOptimizer sa_opt(servers, jobs, sa_cfg);
+                auto sa_rec = sa_opt.optimize(best_records);
+                if (!sa_rec.empty()) {
+                    auto m = computeMetrics(servers, jobs, sa_rec);
+                    double s = m.wait_score * 0.01 + m.memory_score + m.finish_score * 0.1;
+                    if (s < best_score) { best_score = s; best_records = sa_rec; }
+                }
+            }
+            if (N > 100) {
+                LAHCOptimizer::Config lahc_cfg;
+                if (N <= 1000) { lahc_cfg.time_budget_ms = 10000; lahc_cfg.history_length = 500; }
+                else           { lahc_cfg.time_budget_ms = 25000; lahc_cfg.history_length = 1000; }
+                lahc_cfg.no_improve_limit = 50000;
+                LAHCOptimizer lahc_opt(servers, jobs, lahc_cfg);
+                auto lahc_rec = lahc_opt.optimize(best_records);
+                if (!lahc_rec.empty()) {
+                    auto m = computeMetrics(servers, jobs, lahc_rec);
+                    double s = m.wait_score * 0.01 + m.memory_score + m.finish_score * 0.1;
+                    if (s < best_score) { best_score = s; best_records = lahc_rec; }
+                }
+            }
+        } else {
+            // ---- SA for N > 3000 (25s, high-temp slow-cool) ----
+            // Greedy costs ~15s (10 combos), SA ~25s → ~40s total.
+            // Use high temp + slow cooling (= nearly random walk) which
+            // was empirically found to achieve E_wait=0 on all cases.
+            {
+                SAOptimizer::Config sa_cfg;
                 sa_cfg.time_budget_ms = 25000;
-                sa_cfg.iterations_per_temp = 80;
-                sa_cfg.cooling_rate = 0.9995;
-                sa_cfg.initial_temp = 500.0;
-            } else {
-                // Hard/extreme: higher temp, slower cooling, 27s for SA
-                sa_cfg.time_budget_ms = 27000;
-                sa_cfg.iterations_per_temp = 80;
-                sa_cfg.cooling_rate = 0.9998;
+                sa_cfg.iterations_per_temp = 20;
+                sa_cfg.cooling_rate = 0.999;
                 sa_cfg.initial_temp = 2000.0;
-            }
-            sa_cfg.no_improve_limit = 100000;
-
-            SAOptimizer sa_opt(servers, jobs, sa_cfg);
-            auto sa_rec = sa_opt.optimize(best_records);
-            if (!sa_rec.empty()) {
-                auto m = computeMetrics(servers, jobs, sa_rec);
-                double s = m.wait_score * 0.01 + m.memory_score + m.finish_score * 0.1;
-                if (s < best_score) { best_score = s; best_records = sa_rec; }
+                sa_cfg.no_improve_limit = 50000;
+                SAOptimizer sa_opt(servers, jobs, sa_cfg);
+                auto sa_rec = sa_opt.optimize(best_records);
+                if (!sa_rec.empty()) {
+                    auto m = computeMetrics(servers, jobs, sa_rec);
+                    double s = m.wait_score * 0.01 + m.memory_score + m.finish_score * 0.1;
+                    if (s < best_score) { best_score = s; best_records = sa_rec; }
+                }
             }
         }
+    }
 
-        // ----- LAHC (parallel alternative for hard/extreme) -----
-        if (N > 1000) {
-            LAHCOptimizer::Config lahc_cfg;
-            lahc_cfg.time_budget_ms = 27000;  // 27s for LAHC, total ~55s
-            lahc_cfg.history_length = (N <= 3000) ? 1000 : 2000;
-            lahc_cfg.no_improve_limit = 100000;
-
-            LAHCOptimizer lahc_opt(servers, jobs, lahc_cfg);
-            auto lahc_rec = lahc_opt.optimize(best_records);
-            if (!lahc_rec.empty()) {
-                auto m = computeMetrics(servers, jobs, lahc_rec);
-                double s = m.wait_score * 0.01 + m.memory_score + m.finish_score * 0.1;
-                if (s < best_score) { best_score = s; best_records = lahc_rec; }
-            }
+    // --- Final safeguard ---
+    {
+        auto m = computeMetrics(servers, jobs, best_records);
+        double final_score = m.wait_score * 0.01 + m.memory_score + m.finish_score * 0.1;
+        if (final_score > greedy_score) {
+            best_records = greedy_baseline;
         }
     }
 

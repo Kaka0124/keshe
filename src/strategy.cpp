@@ -15,9 +15,13 @@ using namespace std;
 function<bool(const Job&, const Job&)> makeJobComparator(JobSortStrategy strategy) {
     switch (strategy) {
     case JobSortStrategy::BY_RELEASE:
+        // Sort by release_time, then by priority density (mimics SA behavior)
         return [](const Job &a, const Job &b) {
             if (a.release_time != b.release_time) return a.release_time < b.release_time;
-            if (a.duration != b.duration) return a.duration < b.duration;
+            double da = static_cast<double>(a.weight) / a.duration;
+            double db = static_cast<double>(b.weight) / b.duration;
+            if (da != db) return da > db;
+            if (a.gpu_memory != b.gpu_memory) return a.gpu_memory < b.gpu_memory;
             return a.job_id < b.job_id;
         };
 

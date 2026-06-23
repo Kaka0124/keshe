@@ -230,17 +230,27 @@ vector<ScheduleRecord> runMultiStrategy(
     const vector<ServerSpec> &servers,
     const vector<Job> &jobs
 ) {
-    // Try several strategy combos, pick the one with best score
     struct Combo {
         JobSortStrategy js;
         MachineSelectStrategy ms;
     };
 
+    // Curated strategy combos — more is not always better.
+    // These 10 combos cover the most promising search directions.
+    // 10 curated strategy combos.
+    // For N>3000 each greedy run costs ~1.5s, so 10 combos = ~15s.
+    // This is acceptable as long as subsequent SA is budgeted accordingly.
     vector<Combo> combos = {
         {JobSortStrategy::BY_PRIORITY_DENSITY, MachineSelectStrategy::BEST_FIT_COMBINED},
         {JobSortStrategy::BY_PRIORITY_DENSITY, MachineSelectStrategy::BEST_FIT_GPU},
-        {JobSortStrategy::BY_RESOURCE_ASC,    MachineSelectStrategy::BEST_FIT_COMBINED},
-        {JobSortStrategy::BY_SHORTEST_FIRST,  MachineSelectStrategy::BEST_FIT_COMBINED},
+        {JobSortStrategy::BY_PRIORITY_DENSITY, MachineSelectStrategy::WORST_FIT_GPU},
+        {JobSortStrategy::BY_PRIORITY_DENSITY, MachineSelectStrategy::LOAD_BALANCE},
+        {JobSortStrategy::BY_WEIGHT,           MachineSelectStrategy::BEST_FIT_COMBINED},
+        {JobSortStrategy::BY_WEIGHT,           MachineSelectStrategy::BEST_FIT_GPU},
+        {JobSortStrategy::BY_RESOURCE_ASC,     MachineSelectStrategy::BEST_FIT_COMBINED},
+        {JobSortStrategy::BY_SHORTEST_FIRST,   MachineSelectStrategy::BEST_FIT_COMBINED},
+        {JobSortStrategy::BY_GPU_MEM_FIT,      MachineSelectStrategy::WORST_FIT_GPU},
+        {JobSortStrategy::BY_RELEASE,          MachineSelectStrategy::FIRST_FIT},
     };
 
     vector<ScheduleRecord> best_records;
@@ -256,8 +266,8 @@ vector<ScheduleRecord> runMultiStrategy(
             auto records = scheduler.schedule();
 
             EvalMetrics metrics = computeMetrics(servers, jobs, records);
-            // Simple composite score (lower is better)
-            double score = metrics.wait_score * 0.001 + metrics.memory_score + metrics.finish_score * 0.01;
+            // OFFICIAL scoring weights: must match SA energy function
+            double score = metrics.wait_score * 0.01 + metrics.memory_score + metrics.finish_score * 0.1;
 
             if (score < best_score || best_records.empty()) {
                 best_score = score;
