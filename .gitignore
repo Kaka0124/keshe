@@ -1,0 +1,11 @@
+# Compiled binary
+main
+
+# Claude config
+.claude/
+
+# Generated output
+output/
+
+# macOS
+.DS_Store
