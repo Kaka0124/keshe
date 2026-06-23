@@ -1,6 +1,13 @@
 #include "parser.h"
 
+#include <sstream>
+
 using namespace std;
+
+pair<vector<ServerSpec>, vector<Job>> parseInstance(const string &text) {
+    istringstream input(text);
+    return readInstance(input);
+}
 
 pair<vector<ServerSpec>, vector<Job>> readInstance(istream &input) {
     int server_count;
