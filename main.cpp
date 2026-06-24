@@ -54,8 +54,8 @@ int main() {
     if (N > 20) {
         double best_score = greedy_score;
 
-        if (N <= 3000) {
-            // ---- Full SA + LAHC for small/medium/hard cases ----
+        if (N <= 2000) {
+            // ---- Full SA + LAHC for N ≤ 2000 (target < 50s) ----
             {
                 SAOptimizer::Config sa_cfg;
                 if (N <= 100) {
@@ -64,13 +64,13 @@ int main() {
                     sa_cfg.cooling_rate = 0.999;
                     sa_cfg.initial_temp = 200.0;
                 } else if (N <= 1000) {
-                    sa_cfg.time_budget_ms = 25000;
-                    sa_cfg.iterations_per_temp = 60;
+                    sa_cfg.time_budget_ms = 20000;
+                    sa_cfg.iterations_per_temp = 50;
                     sa_cfg.cooling_rate = 0.9995;
                     sa_cfg.initial_temp = 500.0;
                 } else {
-                    sa_cfg.time_budget_ms = 25000;
-                    sa_cfg.iterations_per_temp = 40;
+                    sa_cfg.time_budget_ms = 20000;
+                    sa_cfg.iterations_per_temp = 30;
                     sa_cfg.cooling_rate = 0.9995;
                     sa_cfg.initial_temp = 1000.0;
                 }
@@ -85,8 +85,8 @@ int main() {
             }
             if (N > 100) {
                 LAHCOptimizer::Config lahc_cfg;
-                if (N <= 1000) { lahc_cfg.time_budget_ms = 10000; lahc_cfg.history_length = 500; }
-                else           { lahc_cfg.time_budget_ms = 25000; lahc_cfg.history_length = 1000; }
+                lahc_cfg.time_budget_ms = (N <= 1000) ? 8000 : 15000;
+                lahc_cfg.history_length = (N <= 1000) ? 500 : 1000;
                 lahc_cfg.no_improve_limit = 50000;
                 LAHCOptimizer lahc_opt(servers, jobs, lahc_cfg);
                 auto lahc_rec = lahc_opt.optimize(best_records);
@@ -97,13 +97,10 @@ int main() {
                 }
             }
         } else {
-            // ---- SA for N > 3000 (25s, high-temp slow-cool) ----
-            // Greedy costs ~15s (10 combos), SA ~25s → ~40s total.
-            // Use high temp + slow cooling (= nearly random walk) which
-            // was empirically found to achieve E_wait=0 on all cases.
+            // ---- SA for N > 2000 (20s, high-temp slow-cool, target < 40s) ----
             {
                 SAOptimizer::Config sa_cfg;
-                sa_cfg.time_budget_ms = 25000;
+                sa_cfg.time_budget_ms = 20000;
                 sa_cfg.iterations_per_temp = 20;
                 sa_cfg.cooling_rate = 0.999;
                 sa_cfg.initial_temp = 2000.0;
