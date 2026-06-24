@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <stdexcept>
 #include <iostream>
+#include <unordered_map>
 
 #include "machine_state.h"
 #include "scorer.h"
+#include "timeline.h"
 
 using namespace std;
 
@@ -245,6 +247,7 @@ vector<ScheduleRecord> runMultiStrategy(
         {JobSortStrategy::BY_PRIORITY_DENSITY, MachineSelectStrategy::BEST_FIT_GPU},
         {JobSortStrategy::BY_PRIORITY_DENSITY, MachineSelectStrategy::WORST_FIT_GPU},
         {JobSortStrategy::BY_PRIORITY_DENSITY, MachineSelectStrategy::LOAD_BALANCE},
+        {JobSortStrategy::BY_WEIGHT_DENSITY_REL, MachineSelectStrategy::BEST_FIT_COMBINED},
         {JobSortStrategy::BY_WEIGHT,           MachineSelectStrategy::BEST_FIT_COMBINED},
         {JobSortStrategy::BY_WEIGHT,           MachineSelectStrategy::BEST_FIT_GPU},
         {JobSortStrategy::BY_RESOURCE_ASC,     MachineSelectStrategy::BEST_FIT_COMBINED},
@@ -279,4 +282,245 @@ vector<ScheduleRecord> runMultiStrategy(
     }
 
     return best_records;
+}
+
+// ============================================================
+// t25-style list scheduling: per-job earliest-start placement
+// ============================================================
+// Orders jobs by weight/(r+p+1), then places each at its earliest
+// feasible start time across all servers. This matches team25's
+// Phase 1 and produces much better initial solutions than the
+// event-driven GreedyScheduler for medium/large cases.
+
+vector<ScheduleRecord> listSchedule(
+    const vector<ServerSpec> &servers,
+    const vector<Job> &jobs
+) {
+    int M = (int)servers.size();
+    int N = (int)jobs.size();
+
+    // Build job vector sorted by weight/(r+p+1) (t25 ordering)
+    vector<int> order(N);
+    for (int i = 0; i < N; i++) order[i] = i;
+    sort(order.begin(), order.end(), [&](int a, int b) {
+        const Job &ja = jobs[a], &jb = jobs[b];
+        double sa = (double)ja.weight / (ja.release_time + ja.duration + 1);
+        double sb = (double)jb.weight / (jb.release_time + jb.duration + 1);
+        if (fabs(sa - sb) > 1e-12) return sa > sb;
+        if (ja.release_time != jb.release_time) return ja.release_time < jb.release_time;
+        return ja.duration < jb.duration;
+    });
+
+    // Pre-compute feasible servers per job
+    // (server_id, min_gpu_count)
+    vector<vector<pair<int,int>>> feasible(N);
+    for (int i = 0; i < N; i++) {
+        const Job &j = jobs[i];
+        for (const auto &s : servers) {
+            if (j.cpu_cores > s.cpu_cores || j.memory > s.memory) continue;
+            int u_mem = (j.gpu_memory + s.gpu_memory - 1) / s.gpu_memory;
+            int u = max(j.min_gpu, u_mem);
+            if (u <= s.gpu_count)
+                feasible[i].push_back({s.server_id, u});
+        }
+    }
+
+    // Initialize server timelines
+    vector<ServerTimeline> timelines(M + 1);
+    for (const auto &s : servers)
+        timelines[s.server_id].init(s.gpu_count, s.gpu_memory,
+                                     s.cpu_cores, s.memory);
+
+    // Build server lookup
+    unordered_map<int, const ServerSpec*> srv_map;
+    for (const auto &s : servers) srv_map[s.server_id] = &s;
+
+    vector<ScheduleRecord> result(N + 1); // 1-indexed
+    int max_iter = (N <= 1000) ? 500 : 200;
+
+    for (int idx : order) {
+        const Job &j = jobs[idx];
+        double best_cost = 1e30;
+        int best_s = -1, best_u = 0;
+        long long best_t = 0;
+
+        for (auto &[sid, u_min] : feasible[idx]) {
+            const ServerSpec &sv = *srv_map[sid];
+            for (int u = u_min; u <= min(u_min + 1, sv.gpu_count); u++) {
+                if ((long long)u * sv.gpu_memory < j.gpu_memory) continue;
+                long long t = timelines[sid].earliestStart(
+                    j.release_time, j.duration, u,
+                    j.cpu_cores, j.memory, max_iter);
+                if (t < 0) continue;
+                double cost = (double)j.weight * (t - j.release_time)
+                    + (double)((long long)u * sv.gpu_memory - j.gpu_memory) * 5.0
+                    + (double)(t + j.duration) * 2.0;
+                if (cost < best_cost - 1e-12)
+                    best_cost = cost, best_s = sid, best_t = t, best_u = u;
+            }
+        }
+
+        // Fallback: linear scan on first feasible server
+        if (best_s < 0) {
+            for (auto &[sid, u] : feasible[idx]) {
+                for (long long t = j.release_time; t <= j.release_time + 500000; t++) {
+                    if (timelines[sid].canStart(t, j.duration, u,
+                                                 j.cpu_cores, j.memory)) {
+                        best_s = sid; best_t = t; best_u = u; break;
+                    }
+                }
+                if (best_s >= 0) break;
+            }
+        }
+
+        // Absolute fallback
+        if (best_s < 0) {
+            auto &[sid, u] = feasible[idx][0];
+            best_s = sid; best_t = j.release_time; best_u = u;
+        }
+
+        timelines[best_s].schedule(best_t, j.duration, best_u,
+                                    j.cpu_cores, j.memory);
+        result[j.job_id] = {j.job_id, best_s, best_t, best_u, best_t + j.duration};
+    }
+
+    // Convert to 0-indexed result
+    vector<ScheduleRecord> out;
+    out.reserve(N);
+    for (int jid = 1; jid <= N; jid++) out.push_back(result[jid]);
+    return out;
+}
+
+// ============================================================
+// Post-optimization: cross-server backfill + per-server compaction
+// ============================================================
+// Uses ServerTimeline for earliest-start queries (ported from team25).
+// Significantly improves medium-case results where the event-driven
+// GreedyScheduler alone underperforms vs list-scheduling.
+
+vector<ScheduleRecord> postOptimize(
+    const vector<ServerSpec> &servers,
+    const vector<Job> &jobs,
+    const vector<ScheduleRecord> &initial
+) {
+    int M = (int)servers.size();
+    int N = (int)jobs.size();
+
+    unordered_map<int, const Job*> job_map;
+    for (const auto &j : jobs) job_map[j.job_id] = &j;
+
+    unordered_map<int, const ServerSpec*> srv_map;
+    for (const auto &s : servers) srv_map[s.server_id] = &s;
+
+    // Build ServerTimelines from initial schedule (1-indexed server IDs)
+    vector<ServerTimeline> timelines(M + 1);
+    for (const auto &s : servers) {
+        timelines[s.server_id].init(s.gpu_count, s.gpu_memory,
+                                     s.cpu_cores, s.memory);
+    }
+
+    unordered_map<int, ScheduleRecord> cur;
+    for (const auto &rec : initial) {
+        cur[rec.job_id] = rec;
+        const Job &j = *job_map[rec.job_id];
+        timelines[rec.server_id].schedule(rec.start_time, j.duration,
+                                           rec.gpu_used, j.cpu_cores, j.memory);
+    }
+
+    // Phase 1: Cross-server backfill (2 rounds for N<=2000, 1 for larger)
+    int rounds = (N <= 2000) ? 2 : 1;
+    for (int rnd = 0; rnd < rounds; rnd++) {
+        vector<int> order;
+        for (int jid = 1; jid <= N; jid++) order.push_back(jid);
+        sort(order.begin(), order.end(), [&](int a, int b) {
+            return cur[a].start_time > cur[b].start_time;
+        });
+
+        for (int jid : order) {
+            const Job &j = *job_map[jid];
+            ScheduleRecord &cr = cur[jid];
+
+            // Unschedule
+            timelines[cr.server_id].unschedule(cr.start_time, j.duration,
+                                                cr.gpu_used, j.cpu_cores, j.memory);
+
+            double best_cost = (double)j.weight * (cr.start_time - j.release_time)
+                + (double)((long long)cr.gpu_used * srv_map[cr.server_id]->gpu_memory
+                           - j.gpu_memory) * 5.0
+                + (double)(cr.start_time + j.duration) * 2.0;
+            int best_s = cr.server_id;
+            long long best_t = cr.start_time;
+            int best_u = cr.gpu_used;
+
+            // Try all feasible servers
+            for (const auto &s : servers) {
+                if (j.cpu_cores > s.cpu_cores || j.memory > s.memory) continue;
+                int u_mem = (j.gpu_memory + s.gpu_memory - 1) / s.gpu_memory;
+                int u_min = max(j.min_gpu, u_mem);
+                if (u_min > s.gpu_count) continue;
+
+                for (int u = u_min; u <= min(u_min + 1, s.gpu_count); u++) {
+                    if ((long long)u * s.gpu_memory < j.gpu_memory) continue;
+                    long long t = timelines[s.server_id].earliestStart(
+                        j.release_time, j.duration, u,
+                        j.cpu_cores, j.memory, 200);
+                    if (t < 0) continue;
+
+                    double cost = (double)j.weight * (t - j.release_time)
+                        + (double)((long long)u * s.gpu_memory - j.gpu_memory) * 5.0
+                        + (double)(t + j.duration) * 2.0;
+                    if (cost < best_cost - 1e-12) {
+                        best_cost = cost; best_s = s.server_id;
+                        best_t = t; best_u = u;
+                    }
+                }
+            }
+
+            timelines[best_s].schedule(best_t, j.duration, best_u,
+                                        j.cpu_cores, j.memory);
+            cr = {jid, best_s, best_t, best_u, best_t + j.duration};
+        }
+    }
+
+    // Phase 2: Per-server compaction
+    for (const auto &s : servers) {
+        int sid = s.server_id;
+        ServerTimeline &tl = timelines[sid];
+
+        vector<int> sj;
+        for (int jid = 1; jid <= N; jid++)
+            if (cur[jid].server_id == sid) sj.push_back(jid);
+        if (sj.empty()) continue;
+
+        sort(sj.begin(), sj.end(), [&](int a, int b) {
+            return cur[a].start_time < cur[b].start_time;
+        });
+
+        tl.init(s.gpu_count, s.gpu_memory, s.cpu_cores, s.memory);
+
+        for (int jid : sj) {
+            const Job &j = *job_map[jid];
+            int u = cur[jid].gpu_used;
+            if (u < 1) {
+                int um = (j.gpu_memory + s.gpu_memory - 1) / s.gpu_memory;
+                u = max(j.min_gpu, um);
+                if (u < 1) u = 1;
+            }
+
+            long long t = tl.earliestStart(j.release_time, j.duration,
+                                            u, j.cpu_cores, j.memory, 200);
+            if (t < 0) {
+                for (t = j.release_time; t <= j.release_time + 200000; t++)
+                    if (tl.canStart(t, j.duration, u, j.cpu_cores, j.memory))
+                        break;
+            }
+            tl.schedule(t, j.duration, u, j.cpu_cores, j.memory);
+            cur[jid] = {jid, sid, t, u, t + j.duration};
+        }
+    }
+
+    vector<ScheduleRecord> result;
+    result.reserve(N);
+    for (int jid = 1; jid <= N; jid++) result.push_back(cur[jid]);
+    return result;
 }

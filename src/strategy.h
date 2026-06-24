@@ -11,9 +11,10 @@
 // Job sorting strategies
 // ============================================================
 enum class JobSortStrategy {
-    BY_RELEASE,         // baseline: (release_time, duration, job_id)
-    BY_PRIORITY_DENSITY,// high w_i/p_i first: (-w/d, r, g)
-    BY_RESOURCE_ASC,    // small jobs first: (min_gpu, gpu_memory, r)
+    BY_RELEASE,              // baseline: (release_time, duration, job_id)
+    BY_PRIORITY_DENSITY,     // high w/p first: (-w/d, r, g)
+    BY_WEIGHT_DENSITY_REL,   // high w/(r+p+1) first: t25-style
+    BY_RESOURCE_ASC,         // small jobs first: (min_gpu, gpu_memory, r)
     BY_WEIGHT,          // high weight first: (-w, r, d)
     BY_SHORTEST_FIRST,  // short duration first: (d, -w, r)
     BY_GPU_MEM_FIT,     // best GPU memory fit: (gpu_memory, d, -w)

@@ -21,8 +21,27 @@ int main() {
 
     int N = static_cast<int>(jobs.size());
 
-    // --- Phase 1: Multi-strategy greedy for initial solution ---
-    vector<ScheduleRecord> best_records = runMultiStrategy(servers, jobs);
+    // --- Phase 1: Build initial solution ---
+    // N<=3000: t25-style list scheduling (fastest, best quality for medium cases)
+    // N>3000: multi-strategy greedy (listSchedule earliest_start is too slow per job)
+    vector<ScheduleRecord> best_records;
+    if (N <= 3000) {
+        best_records = listSchedule(servers, jobs);
+        best_records = postOptimize(servers, jobs, best_records);
+        // Also try multi-strategy — keep whichever is better
+        auto multi = runMultiStrategy(servers, jobs);
+        multi = postOptimize(servers, jobs, multi);
+        auto ml = computeMetrics(servers, jobs, best_records);
+        auto mm = computeMetrics(servers, jobs, multi);
+        double sl = ml.wait_score * 0.01 + ml.memory_score + ml.finish_score * 0.1;
+        double sm = mm.wait_score * 0.01 + mm.memory_score + mm.finish_score * 0.1;
+        if (sm < sl) best_records = multi;
+    } else {
+        // N>3000: postOptimize backfill is too slow (earliest_start per job)
+        // and empirically doesn't help on these cases. Rely on SA alone.
+        best_records = runMultiStrategy(servers, jobs);
+    }
+
     // Save the greedy baseline so we can always fall back to it
     const vector<ScheduleRecord> greedy_baseline = best_records;
     double greedy_score = 0;

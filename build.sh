@@ -10,5 +10,6 @@ g++ -std=c++17 -O3 -march=native -flto \
     src/constraint_checker.cpp \
     src/scorer.cpp \
     src/optimizer.cpp \
+    src/timeline.cpp \
     src/output.cpp \
     -o main

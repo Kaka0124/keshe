@@ -78,4 +78,17 @@ std::vector<ScheduleRecord> runMultiStrategy(
     const std::vector<Job> &jobs
 );
 
+// t25-style list scheduling: priority-greedy with earliest-start
+std::vector<ScheduleRecord> listSchedule(
+    const std::vector<ServerSpec> &servers,
+    const std::vector<Job> &jobs
+);
+
+// Post-optimization: cross-server backfill + per-server compaction
+std::vector<ScheduleRecord> postOptimize(
+    const std::vector<ServerSpec> &servers,
+    const std::vector<Job> &jobs,
+    const std::vector<ScheduleRecord> &initial
+);
+
 #endif

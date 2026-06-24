@@ -37,6 +37,16 @@ function<bool(const Job&, const Job&)> makeJobComparator(JobSortStrategy strateg
             return a.job_id < b.job_id;
         };
 
+    case JobSortStrategy::BY_WEIGHT_DENSITY_REL:
+        // t25-style: w/(r+p+1) — penalizes late release + long duration
+        return [](const Job &a, const Job &b) {
+            double da = static_cast<double>(a.weight) / (a.release_time + a.duration + 1);
+            double db = static_cast<double>(b.weight) / (b.release_time + b.duration + 1);
+            if (da != db) return da > db;
+            if (a.release_time != b.release_time) return a.release_time < b.release_time;
+            return a.job_id < b.job_id;
+        };
+
     case JobSortStrategy::BY_RESOURCE_ASC:
         // Small resource jobs first -> better packing, fewer fragments
         return [](const Job &a, const Job &b) {
@@ -272,6 +282,7 @@ string jobSortStrategyName(JobSortStrategy s) {
     switch (s) {
     case JobSortStrategy::BY_RELEASE: return "BY_RELEASE";
     case JobSortStrategy::BY_PRIORITY_DENSITY: return "BY_PRIORITY_DENSITY";
+    case JobSortStrategy::BY_WEIGHT_DENSITY_REL: return "BY_WEIGHT_DENSITY_REL";
     case JobSortStrategy::BY_RESOURCE_ASC: return "BY_RESOURCE_ASC";
     case JobSortStrategy::BY_WEIGHT: return "BY_WEIGHT";
     case JobSortStrategy::BY_SHORTEST_FIRST: return "BY_SHORTEST_FIRST";
